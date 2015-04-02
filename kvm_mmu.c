@@ -30,6 +30,7 @@
 #include "kvm_host.h"
 #include "kvm_mmu.h"
 #include "msr-index.h"
+#include "kvm_glue_alloc.h"
 
 /*
  * When setting this variable to true it enables Two-Dimensional-Paging
@@ -133,6 +134,7 @@ typedef int (*mmu_parent_walk_fn) (struct kvm_vcpu *, struct kvm_mmu_page *);
 struct kmem_cache *pte_chain_cache;
 struct kmem_cache *rmap_desc_cache;
 struct kmem_cache *mmu_page_header_cache;
+struct kmem_cache *kvm_random_page_thing;
 
 static uint64_t shadow_trap_nonpresent_pte;
 static uint64_t shadow_notrap_nonpresent_pte;
@@ -318,8 +320,9 @@ out:
 }
 
 static void *
-mmu_memory_cache_alloc(struct kvm_mmu_memory_cache *mc, size_t size)
+mmu_memory_cache_alloc(struct kvm_mmu_memory_cache *mc)
 {
+	ASSERT(mc->nobjs); /* XXX JMC */
 	if (mc->objects[--mc->nobjs].kpm_object)
 		return (mc->objects[mc->nobjs].kpm_object);
 	else
@@ -327,16 +330,16 @@ mmu_memory_cache_alloc(struct kvm_mmu_memory_cache *mc, size_t size)
 }
 
 static struct kvm_objects
-mmu_memory_page_cache_alloc(struct kvm_mmu_memory_cache *mc, size_t size)
+mmu_memory_page_cache_alloc(struct kvm_mmu_memory_cache *mc)
 {
+	ASSERT(mc->nobjs); /* XXX JMC */
 	return (mc->objects[--mc->nobjs]);
 }
 
 static struct kvm_pte_chain *
 mmu_alloc_pte_chain(struct kvm_vcpu *vcpu)
 {
-	return (mmu_memory_cache_alloc(&vcpu->arch.mmu_pte_chain_cache,
-	    sizeof (struct kvm_pte_chain)));
+	return (mmu_memory_cache_alloc(&vcpu->arch.mmu_pte_chain_cache));
 }
 
 static void
@@ -348,8 +351,7 @@ mmu_free_pte_chain(struct kvm_pte_chain *pc)
 static struct kvm_rmap_desc *
 mmu_alloc_rmap_desc(struct kvm_vcpu *vcpu)
 {
-	return (mmu_memory_cache_alloc(&vcpu->arch.mmu_rmap_desc_cache,
-	    sizeof (struct kvm_rmap_desc)));
+	return (mmu_memory_cache_alloc(&vcpu->arch.mmu_rmap_desc_cache));
 }
 
 static void
@@ -696,11 +698,30 @@ rmap_write_protect(struct kvm *kvm, uint64_t gfn)
 	return (write_protected);
 }
 
+/* XXX DEBUG */
+static int is_empty_shadow_page(uint64_t *spt)
+{
+        uint64_t *pos;
+        uint64_t *end;
+
+        for (pos = spt, end = pos + PAGESIZE / sizeof(uint64_t); pos != end; pos++)
+                if (is_shadow_present_pte(*pos)) {
+                        cmn_err(CE_WARN, "%s: %p %lx\n", __func__,
+                               pos, *pos);
+                        return 0;
+                }
+        return 1;
+}
+
 static void
 kvm_mmu_free_page(struct kvm *kvm, struct kvm_mmu_page *sp)
 {
-	kmem_free(sp->sptkma, PAGESIZE);
-	kmem_free(sp->gfnskma, PAGESIZE);
+	ASSERT(mutex_owned(&kvm->mmu_lock));
+
+	ASSERT(is_empty_shadow_page(sp->spt));
+
+	kmem_cache_free(kvm_random_page_thing, sp->sptkma);
+	kmem_cache_free(kvm_random_page_thing, sp->gfnskma);
 
 	mutex_enter(&kvm->kvm_avllock);
 	avl_remove(&kvm->kvm_avlmp, sp);
@@ -729,14 +750,13 @@ kvm_mmu_alloc_page(struct kvm_vcpu *vcpu, uint64_t *parent_pte)
 	struct kvm_mmu_page *sp;
 	struct kvm_objects kobj;
 
-	sp = mmu_memory_cache_alloc(&vcpu->arch.mmu_page_header_cache,
-	    sizeof (*sp));
-	kobj = mmu_memory_page_cache_alloc(&vcpu->arch.mmu_page_cache,
-	    PAGESIZE);
+	ASSERT(mutex_owned(&vcpu->kvm->mmu_lock));
+
+	sp = mmu_memory_cache_alloc(&vcpu->arch.mmu_page_header_cache);
+	kobj = mmu_memory_page_cache_alloc(&vcpu->arch.mmu_page_cache);
 	sp->spt = kobj.kpm_object;
 	sp->sptkma = kobj.kma_object;
-	kobj = mmu_memory_page_cache_alloc(&vcpu->arch.mmu_page_cache,
-	    PAGESIZE);
+	kobj = mmu_memory_page_cache_alloc(&vcpu->arch.mmu_page_cache);
 	sp->gfns = kobj.kpm_object;
 	sp->gfnskma = kobj.kma_object;
 	sp->kmp_avlspt = (uintptr_t)virt_to_page((caddr_t)sp->spt);
@@ -763,6 +783,7 @@ mmu_page_remove_parent_pte(struct kvm_mmu_page *sp, uint64_t *parent_pte)
 	int i;
 
 	if (!sp->multimapped) {
+		ASSERT(sp->parent_pte == parent_pte);
 		sp->parent_pte = NULL;
 		return;
 	}
@@ -878,6 +899,9 @@ kvm_mmu_update_unsync_bitmap(uint64_t *spte, struct kvm *kvm)
 	index = spte - sp->spt;
 	if (!__test_and_set_bit(index, sp->unsync_child_bitmap))
 		sp->unsync_children++;
+	if (!sp->unsync_children) {
+		cmn_err(CE_WARN, "%s: !sp->unsync_children\n", __func__);
+	}
 }
 
 static void
@@ -1045,6 +1069,8 @@ kvm_mmu_lookup_page(struct kvm *kvm, gfn_t gfn)
 static void
 kvm_unlink_unsync_page(struct kvm *kvm, struct kvm_mmu_page *sp)
 {
+	if (!sp->unsync)
+		cmn_err(CE_WARN, "%s: !sp->unsync\n", __func__);
 	sp->unsync = 0;
 	KVM_KSTAT_DEC(kvm, kvmks_mmu_unsync_page);
 }
@@ -1120,10 +1146,7 @@ mmu_pages_clear_parents(struct mmu_page_path *parents)
 			return;
 
 		--sp->unsync_children;
-		if ((int)sp->unsync_children < 0)
-			cmn_err(CE_WARN,
-			    "mmu_pages_clear_parents: unsync_children (%d)\n",
-			    (int)sp->unsync_children);
+		VERIFY((int)sp->unsync_children >= 0);
 		__clear_bit(idx, sp->unsync_child_bitmap);
 		level++;
 	} while (level < PT64_ROOT_LEVEL-1 && !sp->unsync_children);
@@ -1145,6 +1168,8 @@ mmu_sync_children(struct kvm_vcpu *vcpu, struct kvm_mmu_page *parent)
 	struct mmu_page_path parents;
 	struct kvm_mmu_pages pages;
 
+	ASSERT(mutex_owned(&vcpu->kvm->mmu_lock));
+
 	kvm_mmu_pages_init(parent, &parents, &pages);
 	while (mmu_unsync_walk(parent, &pages, vcpu->kvm)) {
 		int protected = 0;
@@ -1159,9 +1184,7 @@ mmu_sync_children(struct kvm_vcpu *vcpu, struct kvm_mmu_page *parent)
 			kvm_sync_page(vcpu, sp);
 			mmu_pages_clear_parents(&parents);
 		}
-		mutex_enter(&vcpu->kvm->mmu_lock);
 		kvm_mmu_pages_init(parent, &parents, &pages);
-		mutex_exit(&vcpu->kvm->mmu_lock);
 	}
 }
 
@@ -1335,6 +1358,7 @@ kvm_mmu_unlink_parents(struct kvm *kvm, struct kvm_mmu_page *sp)
 			parent_pte = chain->parent_ptes[0];
 		}
 
+		ASSERT(parent_pte);
 		kvm_mmu_put_page(sp, parent_pte);
 		__set_spte(parent_pte, shadow_trap_nonpresent_pte);
 	}
@@ -1369,6 +1393,8 @@ static int
 kvm_mmu_zap_page(struct kvm *kvm, struct kvm_mmu_page *sp)
 {
 	int ret;
+
+	ASSERT(mutex_owned(&kvm->mmu_lock));
 
 	ret = mmu_zap_unsync_children(kvm, sp);
 	kvm_mmu_page_unlink_children(kvm, sp);
@@ -1406,6 +1432,8 @@ void
 kvm_mmu_change_mmu_pages(struct kvm *kvm, unsigned int kvm_nr_mmu_pages)
 {
 	int used_pages;
+
+	ASSERT(mutex_owned(&kvm->mmu_lock));
 
 	used_pages = kvm->arch.n_alloc_mmu_pages - kvm->arch.n_free_mmu_pages;
 	used_pages = MAX(0, used_pages);
@@ -2146,7 +2174,7 @@ kvm_mmu_flush_tlb(struct kvm_vcpu *vcpu)
 static void
 paging_new_cr3(struct kvm_vcpu *vcpu)
 {
-	cmn_err(CE_CONT, "!%s: cr3 %lx\n", __func__, vcpu->arch.cr3);
+	KVM_TRACE1(mmu__paging__new__cr3, uint64_t, vcpu->arch.cr3);
 	mmu_free_roots(vcpu);
 }
 
@@ -2690,6 +2718,8 @@ kvm_mmu_unprotect_page_virt(struct kvm_vcpu *vcpu, gva_t gva)
 void
 __kvm_mmu_free_some_pages(struct kvm_vcpu *vcpu)
 {
+	ASSERT(mutex_owned(&vcpu->kvm->mmu_lock));
+
 	while (vcpu->kvm->arch.n_free_mmu_pages < KVM_REFILL_PAGES &&
 	    !list_is_empty(&vcpu->kvm->arch.active_mmu_pages)) {
 		struct kvm_mmu_page *sp;
@@ -2770,16 +2800,15 @@ alloc_mmu_pages(struct kvm_vcpu *vcpu)
 	 * When emulating 32-bit mode, cr3 is only 32 bits even on x86_64.
 	 * Therefore we need to allocate shadow page tables in the first
 	 * 4GB of memory, which happens to fit the DMA32 zone.
-	 * XXX - for right now, ignore DMA32.  need to use ddi_dma_mem_alloc
-	 * to address this issue...
 	 * XXX - also, don't need to allocate a full page, we'll look
 	 * at htable_t later on solaris.
 	 */
-	page = alloc_page(KM_SLEEP, &vcpu->arch.mmu.alloc_pae_root);
-	if (!page)
+	vcpu->arch.mmu.alloc_pae_root = kvm_glue_alloc(PAGESIZE, PAGESIZE,
+	    KVM_ALLOC_LOW4GB);
+	if (vcpu->arch.mmu.alloc_pae_root == NULL)
 		return (-ENOMEM);
 
-	vcpu->arch.mmu.pae_root = (uint64_t *)page_address(page);
+	vcpu->arch.mmu.pae_root = (uint64_t *)vcpu->arch.mmu.alloc_pae_root;
 
 	for (i = 0; i < 4; ++i)
 		vcpu->arch.mmu.pae_root[i] = INVALID_PAGE;
@@ -2818,7 +2847,7 @@ kvm_mmu_setup(struct kvm_vcpu *vcpu)
 static void
 free_mmu_pages(struct kvm_vcpu *vcpu)
 {
-	kmem_free(vcpu->arch.mmu.alloc_pae_root, PAGESIZE);
+	kvm_glue_free(vcpu->arch.mmu.alloc_pae_root, PAGESIZE);
 }
 
 static void
@@ -2832,7 +2861,7 @@ static void
 mmu_free_memory_cache_page(struct kvm_mmu_memory_cache *mc)
 {
 	while (mc->nobjs)
-		kmem_free(mc->objects[--mc->nobjs].kma_object, PAGESIZE);
+		kmem_cache_free(kvm_random_page_thing, mc->objects[--mc->nobjs].kma_object);
 }
 
 static void
@@ -2859,6 +2888,8 @@ void
 kvm_mmu_slot_remove_write_access(struct kvm *kvm, int slot)
 {
 	struct kvm_mmu_page *sp;
+
+	ASSERT(mutex_owned(&kvm->mmu_lock));
 
 	for (sp = list_head(&kvm->arch.active_mmu_pages);
 	    sp != NULL; sp = list_next(&kvm->arch.active_mmu_pages, sp)) {
@@ -2911,23 +2942,30 @@ mmu_destroy_caches(void)
 		kmem_cache_destroy(rmap_desc_cache);
 	if (mmu_page_header_cache)
 		kmem_cache_destroy(mmu_page_header_cache);
+	if (kvm_random_page_thing)
+		kmem_cache_destroy(kvm_random_page_thing);
 }
 
 int
 kvm_mmu_module_init(void)
 {
+	if ((kvm_random_page_thing = kmem_cache_create("kvm_random_page_thing",
+	    PAGESIZE, PAGESIZE, zero_constructor, NULL, NULL,
+	    (void *)PAGESIZE, NULL, 0)) == NULL)
+		goto nomem;
+
 	if ((pte_chain_cache = kmem_cache_create("kvm_pte_chain",
-	    sizeof (struct kvm_pte_chain), 0, zero_constructor, NULL, NULL,
+	    sizeof (struct kvm_pte_chain), PAGESIZE, zero_constructor, NULL, NULL,
 	    (void *)sizeof (struct kvm_pte_chain), NULL, 0)) == NULL)
 		goto nomem;
 
 	if ((rmap_desc_cache = kmem_cache_create("kvm_rmap_desc",
-	    sizeof (struct kvm_rmap_desc), 0, zero_constructor, NULL, NULL,
+	    sizeof (struct kvm_rmap_desc), PAGESIZE, zero_constructor, NULL, NULL,
 	    (void *)sizeof (struct kvm_rmap_desc), NULL, 0)) == NULL)
 		goto nomem;
 
 	if ((mmu_page_header_cache = kmem_cache_create("kvm_mmu_page_header",
-	    sizeof (struct kvm_mmu_page), 0, zero_constructor, NULL, NULL,
+	    sizeof (struct kvm_mmu_page), PAGESIZE, zero_constructor, NULL, NULL,
 	    (void *)sizeof (struct kvm_mmu_page), NULL, 0)) == NULL)
 		goto nomem;
 
@@ -3057,7 +3095,7 @@ alloc_page(int flag, void **kma_addr)
 	pfn_t pfn;
 	page_t *pp;
 
-	if ((page_addr = kmem_zalloc(PAGESIZE, flag)) == NULL)
+	if ((page_addr = kmem_cache_alloc(kvm_random_page_thing, flag)) == NULL)
 		return ((page_t *)NULL);
 
 	*kma_addr = page_addr;
