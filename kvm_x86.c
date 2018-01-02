@@ -17,7 +17,7 @@
  * GPL HEADER END
  *
  * Copyright 2011 various Linux Kernel contributors.
- * Copyright 2017 Joyent, Inc.
+ * Copyright 2012 Joyent, Inc. All Rights Reserved.
  * Copyright 2011 Richard Lowe
  */
 
@@ -4760,7 +4760,6 @@ kvm_arch_hardware_unsetup(void)
 void
 kvm_arch_exit(void)
 {
-	kvm_mmu_destroy_caches();
 }
 
 void

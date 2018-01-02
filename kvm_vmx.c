@@ -794,7 +794,8 @@ __vmx_load_host_state(struct vcpu_vmx *vmx)
 		 */
 		cli();
 		gsbase = vmcs_readl(HOST_GS_BASE);
-		SET_GS_GSBASE(vmx->host_state.gs_sel, gsbase);
+		kvm_load_gs(vmx->host_state.gs_sel);
+		wrmsrl(MSR_GS_BASE, gsbase);
 		sti();
 	}
 	reload_tss();
@@ -4901,7 +4902,7 @@ vmx_destroy_vcpu(struct kvm_vcpu *vcpu)
 
 	if (vmx->vmcs != NULL) {
 		vcpu_clear(vmx);
-		kmem_cache_free(kvm_vmcs_cache, vmx->vmcs);
+		kmem_free(vmx->vmcs, PAGESIZE);
 		vmx->vmcs = NULL;
 	}
 	if (vmx->guest_msrs != NULL)

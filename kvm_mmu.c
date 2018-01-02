@@ -17,7 +17,7 @@
  * GPL HEADER END
  *
  * Copyright 2011 various Linux Kernel contributors.
- * Copyright 2017 Joyent, Inc.
+ * Copyright 2011 Joyent, Inc. All Rights Reserved.
  * Copyright 2011 Joshua M. Clulow <josh@sysmgr.org>
  * Copyright 2011 Richard Lowe
  */
@@ -1146,7 +1146,10 @@ mmu_pages_clear_parents(struct mmu_page_path *parents)
 			return;
 
 		--sp->unsync_children;
-		VERIFY((int)sp->unsync_children >= 0);
+		if ((int)sp->unsync_children < 0)
+			cmn_err(CE_WARN,
+			    "mmu_pages_clear_parents: unsync_children (%d)\n",
+			    (int)sp->unsync_children);
 		__clear_bit(idx, sp->unsync_child_bitmap);
 		level++;
 	} while (level < PT64_ROOT_LEVEL-1 && !sp->unsync_children);
@@ -2934,7 +2937,7 @@ kvm_mmu_zap_all(struct kvm *kvm)
 }
 
 void
-kvm_mmu_destroy_caches(void)
+mmu_destroy_caches(void)
 {
 	if (pte_chain_cache)
 		kmem_cache_destroy(pte_chain_cache);
@@ -2972,7 +2975,7 @@ kvm_mmu_module_init(void)
 	return (0);
 
 nomem:
-	kvm_mmu_destroy_caches();
+	mmu_destroy_caches();
 	return (ENOMEM);
 }
 

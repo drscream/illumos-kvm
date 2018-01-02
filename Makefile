@@ -2,10 +2,10 @@
 # Copyright 2015 Joyent, Inc.
 #
 
-KERNEL_SOURCE =	$(PWD)/../../illumos
+KERNEL_SOURCE ?=	$(PWD)/../../illumos
 MDB_SOURCE =	$(KERNEL_SOURCE)/usr/src/cmd/mdb
 PROTO_AREA =	$(PWD)/../../../proto
-STRAP_AREA =	$(PWD)/../../../proto.strap
+STRAP_AREA ?=	$(PWD)/../../../proto.strap
 
 CC =		$(STRAP_AREA)/usr/bin/gcc
 LD =		/usr/bin/ld
@@ -108,8 +108,7 @@ KERNEL_CFLAGS = \
 	-Wpointer-arith \
 	-gdwarf-2 \
 	-std=gnu99 \
-	-mno-red-zone \
-	-msave-args
+	-mno-red-zone
 
 USER_CFLAGS = \
 	-finline \
@@ -239,21 +238,20 @@ HDRCHK_SYSHDRS=			\
 
 KMOD_SRCS =			\
 	kvm.c			\
-	kvm_cache_regs.c \
-	kvm_coalesced_mmio.c	\
+	kvm_x86.c		\
 	kvm_emulate.c		\
-	kvm_glue_alloc.c \
-	kvm_i8254.c		\
-	kvm_i8259.c		\
-	kvm_ioapic.c		\
-	kvm_iodev.c		\
 	kvm_irq.c		\
-	kvm_irq_comm.c		\
+	kvm_i8254.c		\
 	kvm_lapic.c		\
 	kvm_mmu.c		\
+	kvm_iodev.c		\
+	kvm_ioapic.c		\
 	kvm_vmx.c		\
-	kvm_svm.c 		\
-	kvm_x86.c
+	kvm_svm.c		\
+	kvm_i8259.c		\
+	kvm_coalesced_mmio.c	\
+	kvm_irq_comm.c		\
+	kvm_cache_regs.c
 
 DMOD_SRCS = \
 	kvm_mdb.c
