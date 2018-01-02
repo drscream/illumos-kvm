@@ -1,14 +1,13 @@
 #
-# Copyright 2015 Joyent, Inc.
+# Copyright (c) 2012, Joyent, Inc.  All Rights Reserved.
 #
 
 KERNEL_SOURCE =	$(PWD)/../../illumos
 MDB_SOURCE =	$(KERNEL_SOURCE)/usr/src/cmd/mdb
 PROTO_AREA =	$(PWD)/../../../proto
-STRAP_AREA =	$(PWD)/../../../proto.strap
 
-CC =		$(STRAP_AREA)/usr/bin/gcc
-LD =		/usr/bin/ld
+CC =		$(PROTO_AREA)/usr/bin/gcc
+LD =		$(PROTO_AREA)/usr/bin/ld
 CTFBINDIR =	$(KERNEL_SOURCE)/usr/src/tools/proto/*/opt/onbld/bin/i386
 CTFCONVERT =	$(CTFBINDIR)/ctfconvert
 CTFMERGE =	$(CTFBINDIR)/ctfmerge
@@ -108,7 +107,8 @@ KERNEL_CFLAGS = \
 	-Wpointer-arith \
 	-gdwarf-2 \
 	-std=gnu99 \
-	-mno-red-zone
+	-mno-red-zone \
+	-msave-args
 
 USER_CFLAGS = \
 	-finline \
@@ -206,6 +206,8 @@ HEADERS=			\
 	kvm_timer.h		\
 	kvm_types.h		\
 	kvm_vmx.h		\
+	kvm_svm.h		\
+	kvm_glue_alloc.h	\
 	kvm_x86host.h		\
 	kvm_x86impl.h		\
 	kvm_x86.h
@@ -229,24 +231,28 @@ HDRCHK_SYSHDRS=			\
 	kvm_timer.h		\
 	kvm_types.h		\
 	kvm_vmx.h		\
+	kvm_svm.h		\
+	kvm_glue_alloc.h	\
 	kvm_x86host.h		\
 	kvm_x86impl.h
 
 KMOD_SRCS =			\
 	kvm.c			\
-	kvm_x86.c		\
+	kvm_cache_regs.c \
+	kvm_coalesced_mmio.c	\
 	kvm_emulate.c		\
-	kvm_irq.c		\
+	kvm_glue_alloc.c \
 	kvm_i8254.c		\
+	kvm_i8259.c		\
+	kvm_ioapic.c		\
+	kvm_iodev.c		\
+	kvm_irq.c		\
+	kvm_irq_comm.c		\
 	kvm_lapic.c		\
 	kvm_mmu.c		\
-	kvm_iodev.c		\
-	kvm_ioapic.c		\
 	kvm_vmx.c		\
-	kvm_i8259.c		\
-	kvm_coalesced_mmio.c	\
-	kvm_irq_comm.c		\
-	kvm_cache_regs.c
+	kvm_svm.c 		\
+	kvm_x86.c
 
 DMOD_SRCS = \
 	kvm_mdb.c
@@ -332,9 +338,6 @@ clean:
 .PHONY: manifest
 manifest:
 	cp manifest $(DESTDIR)/$(DESTNAME)
-
-.PHONY: mancheck_conf
-mancheck_conf:
 
 uninstall:
 	@pfexec rem_drv kvm || /bin/true

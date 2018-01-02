@@ -17,7 +17,7 @@
  * GPL HEADER END
  *
  * Copyright 2011 various Linux Kernel contributors.
- * Copyright (c) 2015 Joyent, Inc. All Rights Reserved.
+ * Copyright (c) 2012 Joyent, Inc. All Rights Reserved.
  */
 
 #ifndef __KVM_X86_HOST_H
@@ -81,7 +81,6 @@
 #define	GP_VECTOR 13
 #define	PF_VECTOR 14
 #define	MF_VECTOR 16
-#define	AC_VECTOR 17
 #define	MC_VECTOR 18
 
 #define	SELECTOR_TI_MASK (1 << 2)
@@ -362,7 +361,6 @@ typedef struct mtrr_state_type {
 } mtrr_state_type_t;
 
 typedef struct kvm_vcpu_arch {
-	uint64_t tsc_offset;
 	/*
 	 * rip and regs accesses must go through
 	 * kvm_{register,rip}_{read,write} functions.
@@ -528,7 +526,7 @@ typedef struct kvm_arch {
 	gpa_t ept_identity_map_addr;
 
 	unsigned long irq_sources_bitmap;
-	uint64_t tsc_offset;
+	uint64_t vm_init_tsc;
 	int64_t kvmclock_offset;
 
 	struct kvm_xen_hvm_config xen_hvm_config;

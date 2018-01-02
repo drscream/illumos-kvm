@@ -352,6 +352,7 @@ typedef struct kvm_guest_debug {
 /* Another bug in KVM_SET_USER_MEMORY_REGION fixed: */
 #define	KVM_CAP_JOIN_MEMORY_REGIONS_WORKS	30
 #define	KVM_CAP_MCE				31
+#define	KVM_CAP_IRQFD				32
 #define	KVM_CAP_PIT2				33
 #define	KVM_CAP_SET_BOOT_CPU_ID			34
 #define	KVM_CAP_PIT_STATE2			35
@@ -424,6 +425,16 @@ typedef struct kvm_clock_data {
 	uint32_t flags;
 	uint32_t pad[9];
 } kvm_clock_data_t;
+
+/*
+ * For hardware providers (VMX, SVM) to provide a
+ *  uniform set of initialisation routines.
+ */
+typedef struct kvm_provider_ops {
+	int	(*provider_init)(void);
+	void	(*provider_fini)(void);
+	int	(*provider_supported)(void);
+} kvm_provider_ops_t;
 
 /*
  * ioctls for VM fds
