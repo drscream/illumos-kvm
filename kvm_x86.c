@@ -17,8 +17,7 @@
  * GPL HEADER END
  *
  * Copyright 2011 various Linux Kernel contributors.
- * Copyright (c) 2012 Joyent, Inc. All Rights Reserved.
- * Copyright 2011 Richard Lowe
+ * Copyright (c) 2015 Joyent, Inc. All Rights Reserved.
  */
 
 #include <sys/types.h>
@@ -1590,7 +1589,6 @@ kvm_dev_ioctl_check_extension(long ext, int *rval_p)
 	case KVM_CAP_REINJECT_CONTROL:
 	case KVM_CAP_IRQ_INJECT_STATUS:
 	case KVM_CAP_ASSIGN_DEV_IRQ:
-	case KVM_CAP_IRQFD:
 	case KVM_CAP_IOEVENTFD:
 	case KVM_CAP_PIT2:
 	case KVM_CAP_PIT_STATE2:
@@ -4857,9 +4855,6 @@ kvm_arch_create_vm(void)
 
 	/* Reserve bit 0 of irq_sources_bitmap for userspace irq source */
 	set_bit(KVM_USERSPACE_IRQ_SOURCE_ID, &kvm->arch.irq_sources_bitmap);
-
-	/* XXX - original is rdtscll() */
-	kvm->arch.vm_init_tsc = (uint64_t)gethrtime();
 
 	return (kvm);
 }

@@ -13,7 +13,7 @@
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
  *
- * Copyright (c) 2014 Joyent, Inc. All rights reserved.
+ * Copyright (c) 2015 Joyent, Inc. All rights reserved.
  */
 
 #include <sys/sysmacros.h>
@@ -658,7 +658,7 @@ update_exception_bitmap(struct kvm_vcpu *vcpu)
 	uint32_t eb;
 
 	eb = (1u << PF_VECTOR) | (1u << UD_VECTOR) | (1u << MC_VECTOR) |
-	    (1u << NM_VECTOR) | (1u << DB_VECTOR);
+	    (1u << NM_VECTOR) | (1u << DB_VECTOR) | (1u <<AC_VECTOR);
 
 #ifndef XXX
 	if ((vcpu->guest_debug &
@@ -794,7 +794,8 @@ __vmx_load_host_state(struct vcpu_vmx *vmx)
 		 */
 		cli();
 		gsbase = vmcs_readl(HOST_GS_BASE);
-		SET_GS_GSBASE(vmx->host_state.gs_sel, gsbase);
+		kvm_load_gs(vmx->host_state.gs_sel);
+		wrmsrl(MSR_GS_BASE, gsbase);
 		sti();
 	}
 	reload_tss();
@@ -870,12 +871,13 @@ vmx_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 		vmcs_writel(HOST_IA32_SYSENTER_ESP, sysenter_esp); /* 22.2.3 */
 
 		/*
-		 * Make sure the time stamp counter is monotonic.
+		 * Make sure that the TSC_OFFSET reflects both this CPU's tick
+		 * delta and the guest's TSC offset.
 		 */
-		vmcs_write64(TSC_OFFSET, tsc_gethrtime_tick_delta());
+		vmcs_write64(TSC_OFFSET, tsc_gethrtime_tick_delta() +
+		    vcpu->arch.tsc_offset);
 	}
 }
-
 
 static void
 vmx_vcpu_put(struct kvm_vcpu *vcpu)
@@ -1110,9 +1112,29 @@ guest_read_tsc(void)
  * guest_tsc = host_tsc + tsc_offset ==> tsc_offset = guest_tsc - host_tsc
  */
 static void
-guest_write_tsc(uint64_t guest_tsc, uint64_t host_tsc)
+guest_write_tsc(struct kvm_vcpu *vcpu, uint64_t guest_tsc)
 {
-	vmcs_write64(TSC_OFFSET, guest_tsc - host_tsc);
+	uint64_t delta = tsc_gethrtime_tick_delta(), now;
+
+	/*
+	 * Read the TSC and true it up based on our tick delta.
+	 */
+	rdtscll(now);
+	now += delta;
+
+	/*
+	 * We can now determine the difference between the guest's TSC and the
+	 * host's TSC in a CPU-neutral sense (that is, without regard to the
+	 * CPU's tick delta); this is what we will store as the guest's offset,
+	 * recalculating the TSC_OFFSET whenever we store it.
+	 */
+	vcpu->arch.tsc_offset = guest_tsc - now;
+
+	/*
+	 * The value that will store as the actual TSC_OFFSET is the CPU's
+	 * tick delta plus the guest's absolute tick offset.
+	 */
+	vmcs_write64(TSC_OFFSET, delta + vcpu->arch.tsc_offset);
 }
 
 /*
@@ -1214,8 +1236,7 @@ vmx_set_msr(struct kvm_vcpu *vcpu, uint32_t msr_index, uint64_t data)
 		vmcs_writel(GUEST_SYSENTER_ESP, data);
 		break;
 	case MSR_IA32_TSC:
-		rdtscll(host_tsc);
-		guest_write_tsc(data, host_tsc);
+		guest_write_tsc(vcpu, data);
 		break;
 	case MSR_IA32_CR_PAT:
 		if (vmcs_config.vmentry_ctrl & VM_ENTRY_LOAD_IA32_PAT) {
@@ -1560,9 +1581,17 @@ free_kvm_area(void)
 	int cpu;
 
 	for (cpu = 0; cpu < ncpus; cpu++) {
-		free_vmcs(vmxarea[cpu]);
-		vmxarea[cpu] = NULL;
+		kmem_free(vmxarea[cpu], PAGESIZE);
+		kmem_free(shared_msrs[cpu], sizeof (struct kvm_shared_msrs));
 	}
+	kmem_free(shared_msrs, ncpus * sizeof (struct kvm_shared_msrs *));
+	shared_msrs = NULL;
+	kmem_free(current_vmcs, ncpus * sizeof (struct vmcs *));
+	current_vmcs = NULL;
+	kmem_free(vmxarea_pa, ncpus * sizeof (uint64_t *));
+	vmxarea_pa = NULL;
+	kmem_free(vmxarea, ncpus * sizeof (struct vmcs *));
+	vmxarea = NULL;
 }
 
 static int
@@ -2550,7 +2579,7 @@ vmx_vcpu_setup(struct vcpu_vmx *vmx)
 {
 	uint32_t host_sysenter_cs, msr_low, msr_high;
 	uint32_t junk;
-	uint64_t host_pat, tsc_this, tsc_base;
+	uint64_t host_pat;
 	volatile uint64_t a;
 	struct descriptor_table dt;
 	int i;
@@ -2696,12 +2725,24 @@ vmx_vcpu_setup(struct vcpu_vmx *vmx)
 		vmx->vcpu.arch.cr4_guest_owned_bits |= X86_CR4_PGE;
 	vmcs_writel(CR4_GUEST_HOST_MASK, ~vmx->vcpu.arch.cr4_guest_owned_bits);
 
-	tsc_base = vmx->vcpu.kvm->arch.vm_init_tsc;
-	rdtscll(tsc_this);
-	if (tsc_this < vmx->vcpu.kvm->arch.vm_init_tsc)
-		tsc_base = tsc_this;
-
-	guest_write_tsc(0, tsc_base);
+	if (vmx->vcpu.kvm->arch.tsc_offset == 0) {
+		/*
+		 * If we are the first VCPU initialized, initialize our guest's
+		 * view of the TSC to 0, and then store the derived TSC offset
+		 * to be used for any subsequent VCPUs.
+		 */
+		guest_write_tsc(&vmx->vcpu, 0);
+		vmx->vcpu.kvm->arch.tsc_offset = vmx->vcpu.arch.tsc_offset;
+	} else {
+		/*
+		 * If a VCPU has already been initialized, we'll use its
+		 * derived TSC offset to assure that our TSCs are (by default
+		 * and to the best of our ability) in sync.
+		 */
+		vmx->vcpu.arch.tsc_offset = vmx->vcpu.kvm->arch.tsc_offset;
+		vmcs_write64(TSC_OFFSET, tsc_gethrtime_tick_delta() +
+		    vmx->vcpu.arch.tsc_offset);
+	}
 
 	return (0);
 }
@@ -3197,6 +3238,9 @@ handle_exception(struct kvm_vcpu *vcpu)
 		kvm_run->debug.arch.pc = vmcs_readl(GUEST_CS_BASE) + rip;
 		kvm_run->debug.arch.exception = ex_no;
 		break;
+	case AC_VECTOR:
+		kvm_queue_exception_e(vcpu, AC_VECTOR, error_code);
+		return (1);
 	default:
 		kvm_run->exit_reason = KVM_EXIT_EXCEPTION;
 		kvm_run->ex.exception = ex_no;
@@ -4858,7 +4902,7 @@ vmx_destroy_vcpu(struct kvm_vcpu *vcpu)
 
 	if (vmx->vmcs != NULL) {
 		vcpu_clear(vmx);
-		kmem_cache_free(kvm_vmcs_cache, vmx->vmcs);
+		kmem_free(vmx->vmcs, PAGESIZE);
 		vmx->vmcs = NULL;
 	}
 	if (vmx->guest_msrs != NULL)

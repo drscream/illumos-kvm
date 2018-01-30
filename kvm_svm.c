@@ -24,7 +24,7 @@
 #include <sys/xc_levels.h>
 #include <sys/ddi.h>
 #include <sys/sunddi.h>
-#include <sys/machsystm.h>
+#include <sys/machsystm.h> 
 
 #include "kvm_bitops.h"
 #include "kvm_msr.h"
